@@ -1,0 +1,32 @@
+# Unreal generated folders (rebuilt automatically)
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+Build/
+
+# IDE files (regenerate with "Generate Visual Studio project files")
+.vs/
+.vscode/
+.idea/
+*.sln
+*.suo
+*.sdf
+*.VC.db
+*.VC.opendb
+
+# Compiled outputs
+*.pdb
+*.dll
+*.exe
+*.obj
+*.lib
+*.exp
+
+# OS junk
+Thumbs.db
+.DS_Store
+
+# Third-party / template assets are not redistributable (Fab & Epic content licenses)
+Content/
+SourceArt/
