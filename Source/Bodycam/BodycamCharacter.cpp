@@ -9,8 +9,10 @@
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/SpotLightComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "GameFramework/SpringArmComponent.h"
+#include "GameFramework/CharacterMovementComponent.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
@@ -53,6 +55,20 @@ ABodycamCharacter::ABodycamCharacter()
 	PostProcess.bOverride_FilmGrainTexelSize = true;
 	PostProcess.FilmGrainTexelSize = 1.5f;
 
+	// The map's post process volume blooms small bright spots into a screen-filling haze with colored lens flare ghosts.
+	// Camera settings win over volumes, so tame both here: standard bloom, low intensity, no flare ghosts.
+	PostProcess.bOverride_BloomMethod = true;
+	PostProcess.BloomMethod = BM_SOG;
+	PostProcess.bOverride_BloomIntensity = true;
+	PostProcess.BloomIntensity = 0.3f;
+	PostProcess.bOverride_LensFlareIntensity = true;
+	PostProcess.LensFlareIntensity = 0.f;
+
+	// Crouch: smaller capsule and slower walk; the rig smooths the height change
+	GetCharacterMovement()->NavAgentProps.bCanCrouch = true;
+	GetCharacterMovement()->SetCrouchedHalfHeight(55.f);
+	GetCharacterMovement()->MaxWalkSpeedCrouched = 150.f;
+
 	BodycamRig = CreateDefaultSubobject<UBodycamRigComponent>(TEXT("BodycamRig"));
 	Pistol = CreateDefaultSubobject<UBodycamPistolComponent>(TEXT("Pistol"));
 
@@ -65,6 +81,21 @@ ABodycamCharacter::ABodycamCharacter()
 	Mesh1P->CastShadow = false;
 	Mesh1P->SetRelativeLocation(FVector(-30.f, 0.f, -150.f));
 
+	// Flashlight starts strapped to the chest next to the bodycam; MountFlashlightOnGun moves it to the muzzle
+	Flashlight = CreateDefaultSubobject<USpotLightComponent>(TEXT("Flashlight"));
+	Flashlight->SetupAttachment(FirstPersonCameraComponent);
+	Flashlight->SetIntensityUnits(ELightUnits::Candelas);
+	Flashlight->SetIntensity(400.f);
+	Flashlight->SetAttenuationRadius(1500.f);
+	// Lumen bounce from a light at the eye floods the whole room; keep it low so only the beam is bright
+	Flashlight->SetIndirectLightingIntensity(0.3f);
+	// Fog right at the lens otherwise glows into a bright blob in front of the gun; keep a faint beam
+	Flashlight->SetVolumetricScatteringIntensity(0.3f);
+	Flashlight->SetInnerConeAngle(12.f);
+	Flashlight->SetOuterConeAngle(28.f);
+	Flashlight->SetLightColor(FLinearColor(1.f, 0.93f, 0.82f));
+	// The first person arms cast no shadow, so the light can sit right at the gun without giving them away
+	Flashlight->SetCastShadows(true);
 }
 
 void ABodycamCharacter::BeginPlay()
@@ -82,6 +113,58 @@ void ABodycamCharacter::BeginPlay()
 		Reverb->Gain = 0.5f;
 	}
 	UGameplayStatics::ActivateReverbEffect(this, Reverb, TEXT("BodycamDefault"), 0.f, DefaultReverbVolume, 0.f);
+
+	Flashlight->SetRelativeLocation(FlashlightChestOffset);
+	Flashlight->SetVisibility(bFlashlightOn);
+
+	// Pick a random moment in tonight's 22:00-04:00 window (04:00 is 28h after today's midnight)
+	const int32 NightStartSeconds = 22 * 3600;
+	const int32 NightLengthSeconds = 6 * 3600;
+	TimestampStart = FDateTime::Today() + FTimespan::FromSeconds(NightStartSeconds + FMath::RandRange(0, NightLengthSeconds - 1));
+}
+
+FText ABodycamCharacter::GetBodycamTimestamp() const
+{
+	// Real time, so pausing or slow motion doesn't freeze the clock
+	const FDateTime Now = TimestampStart + FTimespan::FromSeconds(GetWorld()->GetRealTimeSeconds());
+	return FText::FromString(Now.ToString(TEXT("%Y-%m-%d %H:%M:%S")));
+}
+
+void ABodycamCharacter::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+
+	// On the gun: sit at the muzzle but point where the shots go (AimRoot), same as the pistol's hitscan,
+	// so the beam always shows where a bullet would land regardless of how the muzzle socket is oriented
+	if (bFlashlightOnGun)
+	{
+		const FName MuzzleSocket = Pistol->MuzzleSocketName;
+		const FVector Muzzle = Mesh1P->DoesSocketExist(MuzzleSocket)
+			? Mesh1P->GetSocketLocation(MuzzleSocket)
+			: AimRoot->GetComponentLocation();
+		const FRotator Aim = AimRoot->GetComponentRotation();
+		Flashlight->SetWorldLocationAndRotation(Muzzle + Aim.RotateVector(FlashlightGunOffset), Aim);
+	}
+}
+
+void ABodycamCharacter::MountFlashlightOnGun()
+{
+	bFlashlightOnGun = true;
+	Flashlight->AttachToComponent(Mesh1P, FAttachmentTransformRules::KeepWorldTransform);
+
+	// Equipping shows Mesh1P and everything under it; keep the flashlight in whatever state the player left it
+	Flashlight->SetVisibility(bFlashlightOn);
+}
+
+void ABodycamCharacter::ToggleFlashlight()
+{
+	bFlashlightOn = !bFlashlightOn;
+	Flashlight->SetVisibility(bFlashlightOn);
+
+	if (FlashlightToggleSound)
+	{
+		UGameplayStatics::PlaySound2D(this, FlashlightToggleSound);
+	}
 }
 
 void ABodycamCharacter::Landed(const FHitResult& Hit)
@@ -96,6 +179,22 @@ void ABodycamCharacter::Landed(const FHitResult& Hit)
 		BodycamRig->AddKick(FRotator(-4.f * Strength, 0.f, FMath::RandRange(-2.f, 2.f) * Strength));
 		BodycamRig->AddPositionKick(FVector(0.f, 0.f, -6.f * Strength));
 	}
+}
+
+void ABodycamCharacter::OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnStartCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+
+	// The capsule just shrank and the actor dropped by this much in one frame
+	BodycamRig->AbsorbHeightChange(-ScaledHalfHeightAdjust);
+}
+
+void ABodycamCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnEndCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+
+	// The capsule grew back and the actor rose by this much in one frame
+	BodycamRig->AbsorbHeightChange(ScaledHalfHeightAdjust);
 }
 
 //////////////////////////////////////////////////////////////////////////// Input
@@ -137,6 +236,16 @@ void ABodycamCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 
 		// Interact
 		EnhancedInputComponent->BindAction(InteractAction, ETriggerEvent::Started, this, &ABodycamCharacter::Interact);
+
+		// Crouch (hold)
+		EnhancedInputComponent->BindAction(CrouchAction, ETriggerEvent::Started, this, &ABodycamCharacter::StartCrouch);
+		EnhancedInputComponent->BindAction(CrouchAction, ETriggerEvent::Completed, this, &ABodycamCharacter::StopCrouch);
+
+		// Flashlight
+		if (FlashlightAction)
+		{
+			EnhancedInputComponent->BindAction(FlashlightAction, ETriggerEvent::Started, this, &ABodycamCharacter::ToggleFlashlight);
+		}
 
 		// Fire / Reload / Aim
 		Pistol->BindInput(EnhancedInputComponent);

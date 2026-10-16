@@ -15,6 +15,7 @@ class USoundAttenuation;
 class USoundBase;
 class UNiagaraSystem;
 class UMaterialInterface;
+class UPointLightComponent;
 
 /**
  * Sidearm built into the first person mesh (hands + pistol in one skeletal mesh).
@@ -101,6 +102,26 @@ public:
 	UPROPERTY(EditAnywhere, Category="Pistol|Shooting")
 	float ImpactImpulse = 30000.f;
 
+	// --- Muzzle flash ---
+
+	/** Particle flash spawned at the muzzle, attached so it follows the gun */
+	UPROPERTY(EditAnywhere, Category="Pistol|MuzzleFlash")
+	TObjectPtr<UNiagaraSystem> MuzzleFlashEffect;
+
+	/** Brief light at the muzzle that lights up the surroundings on each shot (candelas) */
+	UPROPERTY(EditAnywhere, Category="Pistol|MuzzleFlash")
+	float MuzzleFlashIntensity = 2000.f;
+
+	UPROPERTY(EditAnywhere, Category="Pistol|MuzzleFlash")
+	float MuzzleFlashRadius = 1200.f;
+
+	UPROPERTY(EditAnywhere, Category="Pistol|MuzzleFlash")
+	FLinearColor MuzzleFlashColor = FLinearColor(1.f, 0.75f, 0.45f);
+
+	/** Seconds the flash light stays on */
+	UPROPERTY(EditAnywhere, Category="Pistol|MuzzleFlash")
+	float MuzzleFlashDuration = 0.05f;
+
 	// --- Impact ---
 
 	/** Particle burst at the hit point (dust, sparks...). Spawned facing out of the surface. */
@@ -121,6 +142,13 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Pistol|Impact")
 	TObjectPtr<USoundBase> ImpactSound;
+
+	/** Used instead of ImpactEffect when a character (zombie) is hit. No bullet hole is left on characters. */
+	UPROPERTY(EditAnywhere, Category="Pistol|Impact")
+	TObjectPtr<UNiagaraSystem> FleshImpactEffect;
+
+	UPROPERTY(EditAnywhere, Category="Pistol|Impact")
+	TObjectPtr<USoundBase> FleshImpactSound;
 
 	/** Draw each shot's trace for a second (testing) */
 	UPROPERTY(EditAnywhere, Category="Pistol|Shooting")
@@ -204,6 +232,7 @@ private:
 	/** Dust / bullet hole / sound where a shot landed */
 	void SpawnImpactEffects(const FHitResult& Hit);
 	void PlayFireSound();
+	void PlayMuzzleFlash();
 	void ApplyRecoil();
 
 	/** Plays a montage that blocks firing/reloading until it ends. */
@@ -215,6 +244,12 @@ private:
 
 	UPROPERTY(Transient)
 	TObjectPtr<ABodycamCharacter> Character;
+
+	/** Created at BeginPlay on the muzzle; switched on briefly per shot */
+	UPROPERTY(Transient)
+	TObjectPtr<UPointLightComponent> MuzzleLight;
+
+	FTimerHandle MuzzleLightTimer;
 
 	/** Built at runtime so the 2D fire sound is sent to the reverb */
 	UPROPERTY(Transient)

@@ -155,12 +155,15 @@ void UBodycamRigComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 	StepSpring(KickAngles, KickAngularVelocity, FVector::ZeroVector, KickStiffness, KickDampingRatio, DeltaTime);
 	StepSpring(KickOffset, KickOffsetVelocity, FVector::ZeroVector, KickStiffness, KickDampingRatio, DeltaTime);
 
+	HeightSmoothingOffset = FMath::FInterpTo(HeightSmoothingOffset, 0.f, DeltaTime, HeightSmoothingSpeed);
+	const FVector HeightSmoothing(0.f, 0.f, HeightSmoothingOffset);
+
 	// --- Compose ---
 	const FVector Angles = FollowAngles + BobAngles * (BobAlpha * BobScale) + IdleAngles * SwayScale + KickAngles + FVector(0.f, 0.f, SmoothedTurnRoll);
 	const FRotator ViewRotation(Angles.X, Angles.Y, Angles.Z);
 	const FRotator ChestYaw(0.f, FollowAngles.Y, 0.f);
 
-	const FVector ViewLocation = OwnerCharacter->GetActorLocation()
+	const FVector ViewLocation = OwnerCharacter->GetActorLocation() + HeightSmoothing
 		+ ChestYaw.RotateVector(MountOffset)
 		+ ViewRotation.RotateVector(BobOffset * (BobAlpha * BobScale) + KickOffset);
 
@@ -172,7 +175,7 @@ void UBodycamRigComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 		const FRotator TrueAim(FRotator::NormalizeAxis(Aim.Pitch), Aim.Yaw, 0.f);
 		const FQuat ArmRotation = FQuat::Slerp(ViewRotation.Quaternion(), TrueAim.Quaternion(), ArmAimFollow);
 
-		const FVector ArmLocation = OwnerCharacter->GetActorLocation()
+		const FVector ArmLocation = OwnerCharacter->GetActorLocation() + HeightSmoothing
 			+ ChestYaw.RotateVector(ArmPivotOffset)
 			+ ViewRotation.RotateVector(BobOffset * (BobAlpha * BobScale) + KickOffset);
 

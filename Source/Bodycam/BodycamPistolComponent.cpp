@@ -9,6 +9,9 @@
 #include "DrawDebugHelpers.h"
 #include "NiagaraFunctionLibrary.h"
 #include "Components/DecalComponent.h"
+#include "Components/PointLightComponent.h"
+#include "GameFramework/Pawn.h"
+#include "TimerManager.h"
 #include "EnhancedInputComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -36,6 +39,22 @@ void UBodycamPistolComponent::BeginPlay()
 		// Hands and pistol are one mesh, so nothing is visible until the pistol is picked up
 		Character->GetMesh1P()->SetVisibility(false, true);
 
+		// Muzzle flash light lives on the gun's muzzle and is off until a shot
+		MuzzleLight = NewObject<UPointLightComponent>(GetOwner(), TEXT("MuzzleFlashLight"));
+		MuzzleLight->RegisterComponent();
+		MuzzleLight->AttachToComponent(Character->GetMesh1P(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, MuzzleSocketName);
+		MuzzleLight->SetIntensityUnits(ELightUnits::Candelas);
+		MuzzleLight->SetIntensity(0.f);
+		// The light sits right next to the floating first person arms; their shadows would give the trick away
+		MuzzleLight->SetCastShadows(false);
+		// Lumen accumulates indirect light over many frames, so a 0.05s flash's bounce lingers for about a second.
+		// Direct light only: on and off within the flash duration.
+		MuzzleLight->SetIndirectLightingIntensity(0.f);
+		MuzzleLight->SetVisibility(false);
+
+		UE_LOG(LogTemp, Log, TEXT("[Pistol] Muzzle socket '%s' found: %d"),
+			*MuzzleSocketName.ToString(), Character->GetMesh1P()->DoesSocketExist(MuzzleSocketName));
+
 		HipMeshLocation = Character->GetMesh1P()->GetRelativeLocation();
 		HipMeshRotation = Character->GetMesh1P()->GetRelativeRotation();
 		BaseWalkSpeed = Character->GetCharacterMovement()->MaxWalkSpeed;
@@ -57,6 +76,15 @@ void UBodycamPistolComponent::Equip()
 	bEquipped = true;
 	USkeletalMeshComponent* Mesh = Character->GetMesh1P();
 	Mesh->SetVisibility(true, true);
+
+	// Showing the mesh propagates to its children, which includes the muzzle light; keep it off until a shot
+	if (MuzzleLight)
+	{
+		MuzzleLight->SetVisibility(false);
+	}
+
+	// From now on the flashlight is mounted on the gun instead of the chest
+	Character->MountFlashlightOnGun();
 
 	const bool bPlayed = PlayBusyMontage(DrawMontage);
 	UE_LOG(LogTemp, Log, TEXT("[Pistol] Equip: Mesh=%s AnimInstance=%s DrawMontage=%s Played=%d MeshLoc=%s"),
@@ -136,6 +164,7 @@ void UBodycamPistolComponent::Fire()
 
 	FireHitscan();
 	PlayFireSound();
+	PlayMuzzleFlash();
 	ApplyRecoil();
 	PlayMontage(FireMontage);
 
@@ -257,6 +286,20 @@ void UBodycamPistolComponent::SpawnImpactEffects(const FHitResult& Hit)
 	// Effects face out of the surface, so dust sprays back toward the shooter's side
 	const FRotator SurfaceRotation = Hit.ImpactNormal.Rotation();
 
+	// Characters (zombies) bleed; everything else is treated as a wall
+	if (Cast<APawn>(Hit.GetActor()))
+	{
+		if (FleshImpactEffect)
+		{
+			UNiagaraFunctionLibrary::SpawnSystemAtLocation(this, FleshImpactEffect, Hit.ImpactPoint, SurfaceRotation);
+		}
+		if (FleshImpactSound)
+		{
+			UGameplayStatics::PlaySoundAtLocation(this, FleshImpactSound, Hit.ImpactPoint);
+		}
+		return;
+	}
+
 	if (ImpactEffect)
 	{
 		UNiagaraFunctionLibrary::SpawnSystemAtLocation(this, ImpactEffect, Hit.ImpactPoint, SurfaceRotation);
@@ -272,10 +315,14 @@ void UBodycamPistolComponent::SpawnImpactEffects(const FHitResult& Hit)
 		if (UDecalComponent* Decal = UGameplayStatics::SpawnDecalAttached(ImpactDecal, ImpactDecalSize, Hit.GetComponent(), NAME_None,
 			Hit.ImpactPoint, DecalRotation, EAttachLocation::KeepWorldPosition, ImpactDecalLifetime))
 		{
-			// Start fading a couple of seconds before the lifetime ends
+			// Small decals are culled once they shrink on screen (default 0.01); bullet holes are tiny, so keep them at any distance
+			Decal->SetFadeScreenSize(0.f);
+
+			// Start fading a couple of seconds before the lifetime ends.
+			// The decal's owner is the actor we hit, so never let the fade destroy its owner (defaults to true).
 			if (ImpactDecalLifetime > 0.f)
 			{
-				Decal->SetFadeOut(FMath::Max(ImpactDecalLifetime - 2.f, 0.f), 2.f);
+				Decal->SetFadeOut(FMath::Max(ImpactDecalLifetime - 2.f, 0.f), 2.f, false);
 			}
 		}
 	}
@@ -283,6 +330,33 @@ void UBodycamPistolComponent::SpawnImpactEffects(const FHitResult& Hit)
 	if (ImpactSound)
 	{
 		UGameplayStatics::PlaySoundAtLocation(this, ImpactSound, Hit.ImpactPoint);
+	}
+}
+
+void UBodycamPistolComponent::PlayMuzzleFlash()
+{
+	if (MuzzleFlashEffect)
+	{
+		UNiagaraFunctionLibrary::SpawnSystemAttached(MuzzleFlashEffect, Character->GetMesh1P(), MuzzleSocketName,
+			FVector::ZeroVector, FRotator::ZeroRotator, EAttachLocation::SnapToTarget, true);
+	}
+
+	if (MuzzleLight && MuzzleFlashIntensity > 0.f)
+	{
+		MuzzleLight->SetIntensity(MuzzleFlashIntensity);
+		MuzzleLight->SetAttenuationRadius(MuzzleFlashRadius);
+		MuzzleLight->SetLightColor(MuzzleFlashColor);
+		MuzzleLight->SetVisibility(true);
+
+		// Turn it off again after a couple of frames
+		TWeakObjectPtr<UPointLightComponent> Light = MuzzleLight;
+		GetWorld()->GetTimerManager().SetTimer(MuzzleLightTimer, [Light]()
+		{
+			if (Light.IsValid())
+			{
+				Light->SetVisibility(false);
+			}
+		}, MuzzleFlashDuration, false);
 	}
 }
 

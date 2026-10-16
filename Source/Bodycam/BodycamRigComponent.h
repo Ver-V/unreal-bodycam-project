@@ -31,6 +31,12 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Bodycam")
 	void AddPositionKick(const FVector& Kick);
 
+	/**
+	 * Cancels a sudden actor height change (crouch resizes the capsule and teleports the actor)
+	 * so the camera and arms ease to the new height instead of snapping.
+	 */
+	void AbsorbHeightChange(float DeltaZ) { HeightSmoothingOffset -= DeltaZ; }
+
 	/** 0 = hip, 1 = fully aiming down sights. Blends the camera toward the Aim settings below. */
 	UFUNCTION(BlueprintCallable, Category="Bodycam")
 	void SetAimAlpha(float Alpha) { AimAlpha = FMath::Clamp(Alpha, 0.f, 1.f); }
@@ -129,6 +135,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bodycam|Aim", meta=(ClampMin="0", ClampMax="1"))
 	float AimSwayScale = 0.7f;
 
+	/** How fast the view settles after crouching / standing (higher = snappier) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bodycam|Mount")
+	float HeightSmoothingSpeed = 8.f;
+
 	// --- Kicks (recoil, landing) ---
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bodycam|Kick")
@@ -176,5 +186,7 @@ private:
 	float SmoothedTurnRoll = 0.f;
 	float NoiseTime = 0.f;
 	float AimAlpha = 0.f;
+	/** World Z offset that hides capsule resizes; decays to zero */
+	float HeightSmoothingOffset = 0.f;
 	bool bInitialized = false;
 };

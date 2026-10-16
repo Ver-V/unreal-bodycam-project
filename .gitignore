@@ -30,3 +30,6 @@ Thumbs.db
 # Third-party / template assets are not redistributable (Fab & Epic content licenses)
 Content/
 SourceArt/
+
+# Third-party plugins (e.g. NVIDIA DLSS) are not redistributable
+Plugins/
