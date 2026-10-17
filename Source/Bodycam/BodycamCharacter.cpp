@@ -5,6 +5,7 @@
 #include "BodycamRigComponent.h"
 #include "BodycamPistolComponent.h"
 #include "BodycamInteractable.h"
+#include "BodycamZombieSpawnPoint.h"
 #include "Engine/World.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
@@ -19,6 +20,10 @@
 #include "Engine/LocalPlayer.h"
 #include "Kismet/GameplayStatics.h"
 #include "Sound/ReverbEffect.h"
+#include "TimerManager.h"
+#include "Camera/PlayerCameraManager.h"
+#include "Components/AudioComponent.h"
+#include "EngineUtils.h"
 
 DEFINE_LOG_CATEGORY(LogTemplateCharacter);
 
@@ -81,7 +86,26 @@ ABodycamCharacter::ABodycamCharacter()
 	Mesh1P->CastShadow = false;
 	Mesh1P->SetRelativeLocation(FVector(-30.f, 0.f, -150.f));
 
-	// Flashlight starts strapped to the chest next to the bodycam; MountFlashlightOnGun moves it to the muzzle
+	// Objective lines. Override per level in the Blueprint.
+	ObjectivePickUpGun = FText::FromString(TEXT("OBJECTIVE: Pick up the gun"));
+	ObjectiveEscape = FText::FromString(TEXT("OBJECTIVE: Get out of the building"));
+	ObjectiveFindKey = FText::FromString(TEXT("OBJECTIVE: Find the key"));
+	ObjectiveUnlockExit = FText::FromString(TEXT("OBJECTIVE: Unlock the door and leave the building"));
+	EscapedText = FText::FromString(TEXT("ESCAPED"));
+
+	// The character's own voice sits "in the listener's head": no 3D panning
+	VoiceAudio = CreateDefaultSubobject<UAudioComponent>(TEXT("VoiceAudio"));
+	VoiceAudio->SetupAttachment(GetCapsuleComponent());
+	VoiceAudio->bAutoActivate = false;
+	VoiceAudio->bAllowSpatialization = false;
+
+	// Breathing has its own channel so voice lines don't cut it off
+	BreathingAudio = CreateDefaultSubobject<UAudioComponent>(TEXT("BreathingAudio"));
+	BreathingAudio->SetupAttachment(GetCapsuleComponent());
+	BreathingAudio->bAutoActivate = false;
+	BreathingAudio->bAllowSpatialization = false;
+
+	// Flashlight starts strapped to the chest next to the bodycam; OnPistolEquipped moves it to the muzzle
 	Flashlight = CreateDefaultSubobject<USpotLightComponent>(TEXT("Flashlight"));
 	Flashlight->SetupAttachment(FirstPersonCameraComponent);
 	Flashlight->SetIntensityUnits(ELightUnits::Candelas);
@@ -117,10 +141,172 @@ void ABodycamCharacter::BeginPlay()
 	Flashlight->SetRelativeLocation(FlashlightChestOffset);
 	Flashlight->SetVisibility(bFlashlightOn);
 
+	Health = MaxHealth;
+
+	// The pistol may already be in hand (bStartEquipped), which set the escape objective during Super::BeginPlay
+	if (!Pistol->IsEquipped())
+	{
+		SetObjective(ObjectivePickUpGun);
+	}
+
 	// Pick a random moment in tonight's 22:00-04:00 window (04:00 is 28h after today's midnight)
 	const int32 NightStartSeconds = 22 * 3600;
 	const int32 NightLengthSeconds = 6 * 3600;
 	TimestampStart = FDateTime::Today() + FTimespan::FromSeconds(NightStartSeconds + FMath::RandRange(0, NightLengthSeconds - 1));
+}
+
+float ABodycamCharacter::TakeDamage(float DamageAmount, FDamageEvent const& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	if (bDead)
+	{
+		return 0.f;
+	}
+
+	const float Damage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
+	Health -= Damage;
+
+	// A swipe knocks the chest camera hard, tilting away from the attacker's side
+	const float Side = DamageCauser
+		? FMath::Sign(FVector::DotProduct(DamageCauser->GetActorLocation() - GetActorLocation(), GetActorRightVector()))
+		: 1.f;
+	BodycamRig->AddKick(FRotator(-6.f, 4.f * Side, -8.f * Side));
+	BodycamRig->AddPositionKick(FVector(-8.f, 0.f, -3.f));
+
+	PlayVoice(HurtSound, true);
+
+	if (Health <= 0.f)
+	{
+		Die();
+	}
+	return Damage;
+}
+
+void ABodycamCharacter::Die()
+{
+	bDead = true;
+
+	// The bodycam sinks to the floor and tips onto its side, then the screen fades once it's down
+	BodycamRig->StartDeathFall();
+	EndRun(DeathFadeDelay);
+}
+
+void ABodycamCharacter::EndRun(float FadeDelay)
+{
+	GetCharacterMovement()->DisableMovement();
+	if (APlayerController* PC = Cast<APlayerController>(Controller))
+	{
+		DisableInput(PC);
+
+		TWeakObjectPtr<APlayerController> WeakPC = PC;
+		const float FadeDuration = DeathFadeDuration;
+		auto StartFade = [WeakPC, FadeDuration]()
+		{
+			if (WeakPC.IsValid() && WeakPC->PlayerCameraManager)
+			{
+				WeakPC->PlayerCameraManager->StartCameraFade(0.f, 1.f, FadeDuration, FLinearColor::Black, false, true);
+			}
+		};
+
+		// SetTimer with a delay of 0 clears the timer instead of firing it, so fade right away
+		if (FadeDelay > 0.f)
+		{
+			GetWorldTimerManager().SetTimer(DeathFadeTimer, StartFade, FadeDelay, false);
+		}
+		else
+		{
+			StartFade();
+		}
+
+		GetWorldTimerManager().SetTimer(RestartTimer, PC, &APlayerController::RestartLevel, RestartDelay, false);
+	}
+}
+
+void ABodycamCharacter::SetObjective(const FText& Text)
+{
+	// Same line still on screen: leave it alone instead of restarting its fade (e.g. bumping the locked door again)
+	if (Text.EqualTo(ObjectiveText) && GetObjectiveAlpha() > 0.f)
+	{
+		return;
+	}
+	ObjectiveText = Text;
+	ObjectiveSetTime = GetWorld()->GetRealTimeSeconds();
+}
+
+float ABodycamCharacter::GetObjectiveAlpha() const
+{
+	// 0.5s fade in, hold, 1s fade out
+	const float Age = GetWorld()->GetRealTimeSeconds() - ObjectiveSetTime;
+	const float FadeIn = FMath::Clamp(Age / 0.5f, 0.f, 1.f);
+	const float FadeOut = FMath::Clamp(1.f - (Age - 0.5f - ObjectiveShowTime) / 1.f, 0.f, 1.f);
+	return FMath::Min(FadeIn, FadeOut);
+}
+
+FSlateColor ABodycamCharacter::GetObjectiveColor() const
+{
+	return FSlateColor(FLinearColor(1.f, 1.f, 1.f, GetObjectiveAlpha()));
+}
+
+FLinearColor ABodycamCharacter::GetObjectiveShadowColor() const
+{
+	return FLinearColor(0.f, 0.f, 0.f, GetObjectiveAlpha());
+}
+
+void ABodycamCharacter::GiveKey()
+{
+	bHasKey = true;
+	SetObjective(ObjectiveUnlockExit);
+
+	// The way back gets dangerous
+	ABodycamZombieSpawnPoint::TriggerEvent(this, EBodycamSpawnEvent::KeyPickedUp);
+}
+
+void ABodycamCharacter::NotifyExitLocked()
+{
+	if (!bHasKey)
+	{
+		SetObjective(ObjectiveFindKey);
+	}
+}
+
+void ABodycamCharacter::PlayVoice(USoundBase* Sound, bool bForce)
+{
+	if (Sound == nullptr || bDead)
+	{
+		return;
+	}
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (!bForce && Now - LastVoiceTime < VoiceCooldown)
+	{
+		return;
+	}
+	LastVoiceTime = Now;
+
+	// One mouth: a new line replaces whatever was being said
+	VoiceAudio->SetSound(Sound);
+	VoiceAudio->Play();
+}
+
+void ABodycamCharacter::OnSpottedByZombie()
+{
+	// A beat after the zombie's shriek, so the two don't land on top of each other
+	GetWorldTimerManager().SetTimer(VoiceTimer, FTimerDelegate::CreateWeakLambda(this, [this]() { PlayVoice(SpottedSound, false); }), 0.5f, false);
+}
+
+void ABodycamCharacter::OnZombieKilled()
+{
+	// Let the body drop first
+	GetWorldTimerManager().SetTimer(VoiceTimer, FTimerDelegate::CreateWeakLambda(this, [this]() { PlayVoice(KillSound, false); }), 0.8f, false);
+}
+
+void ABodycamCharacter::Escape()
+{
+	if (bEscaped || bDead)
+	{
+		return;
+	}
+	bEscaped = true;
+	SetObjective(EscapedText);
+	EndRun(0.f);
 }
 
 FText ABodycamCharacter::GetBodycamTimestamp() const
@@ -133,6 +319,20 @@ FText ABodycamCharacter::GetBodycamTimestamp() const
 void ABodycamCharacter::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
+
+	UpdateBreathing(DeltaSeconds);
+
+	// Footsteps by distance walked on the ground, the same measure the rig's walk bob uses, so sound and camera dips line up
+	if (FootstepSound && !bDead && GetCharacterMovement()->IsMovingOnGround())
+	{
+		FootstepTravel += GetVelocity().Size2D() * DeltaSeconds;
+		if (FootstepTravel >= FootstepDistance)
+		{
+			FootstepTravel -= FootstepDistance;
+			const float Volume = bIsCrouched ? CrouchFootstepVolume : 1.f;
+			UGameplayStatics::PlaySound2D(this, FootstepSound, Volume, FMath::FRandRange(0.92f, 1.08f));
+		}
+	}
 
 	// On the gun: sit at the muzzle but point where the shots go (AimRoot), same as the pistol's hitscan,
 	// so the beam always shows where a bullet would land regardless of how the muzzle socket is oriented
@@ -147,8 +347,40 @@ void ABodycamCharacter::Tick(float DeltaSeconds)
 	}
 }
 
-void ABodycamCharacter::MountFlashlightOnGun()
+void ABodycamCharacter::UpdateBreathing(float DeltaSeconds)
 {
+	if (BreathingSound == nullptr)
+	{
+		return;
+	}
+
+	// Footsteps cover it while moving; once you stop, you hear yourself panting
+	const bool bStill = !bDead && GetVelocity().Size2D() < 10.f;
+	StillTime = bStill ? StillTime + DeltaSeconds : 0.f;
+
+	const bool bShouldBreathe = StillTime >= BreathingDelay;
+	if (bShouldBreathe && !bBreathing)
+	{
+		bBreathing = true;
+		BreathingAudio->SetSound(BreathingSound);
+		BreathingAudio->FadeIn(1.f, 1.f, FMath::FRandRange(0.f, 2.f)); // random start point so it doesn't restart the same breath each time
+	}
+	else if (!bShouldBreathe && bBreathing)
+	{
+		bBreathing = false;
+		BreathingAudio->FadeOut(0.8f, 0.f);
+	}
+
+	// Louder the more hurt you are: full health = BreathingVolume, near death = up to 2x
+	const float Hurt = 1.f - FMath::Clamp(Health / MaxHealth, 0.f, 1.f);
+	BreathingAudio->SetVolumeMultiplier(BreathingVolume * (1.f + Hurt));
+}
+
+void ABodycamCharacter::OnPistolEquipped()
+{
+	SetObjective(bHasKey ? ObjectiveUnlockExit : ObjectiveEscape);
+	ABodycamZombieSpawnPoint::TriggerEvent(this, EBodycamSpawnEvent::PistolPickedUp);
+
 	bFlashlightOnGun = true;
 	Flashlight->AttachToComponent(Mesh1P, FAttachmentTransformRules::KeepWorldTransform);
 
@@ -284,18 +516,76 @@ void ABodycamCharacter::Look(const FInputActionValue& Value)
 }
 void ABodycamCharacter::Interact()
 {
-	// Sweep from the eyes along the aim, not the lagging bodycam view
-	const FVector Start = AimRoot->GetComponentLocation();
-	const FVector End = Start + GetControlRotation().Vector() * InteractDistance;
+	// Trace along what the player actually sees: the center of the bodycam image.
+	// The aim (control rotation) leads the chest camera by up to several degrees and starts higher up,
+	// so tracing along it missed items that were dead center on screen.
+	const FVector Start = FirstPersonCameraComponent->GetComponentLocation();
+	const FVector Direction = FirstPersonCameraComponent->GetForwardVector();
+	const FVector End = Start + Direction * InteractDistance;
 
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(BodycamInteract), false, this);
+	AActor* Target = nullptr;
 	FHitResult Hit;
-	if (!GetWorld()->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, ECC_Visibility, FCollisionShape::MakeSphere(InteractRadius), Params))
+
+	// 1) Precise: a line against the real mesh triangles (works for scanned meshes with no simple collision)
+	FCollisionQueryParams ComplexParams(SCENE_QUERY_STAT(BodycamInteract), true, this);
+	if (GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, ComplexParams))
 	{
-		return;
+		Target = Hit.GetActor();
 	}
 
-	AActor* Target = Hit.GetActor();
+	// 2) Forgiving: a thick sweep, since there is no crosshair (only hits simple collision)
+	if (Target == nullptr || !Target->Implements<UBodycamInteractable>())
+	{
+		FCollisionQueryParams SimpleParams(SCENE_QUERY_STAT(BodycamInteract), false, this);
+		Target = GetWorld()->SweepSingleByChannel(Hit, Start, End, FQuat::Identity, ECC_Visibility, FCollisionShape::MakeSphere(InteractRadius), SimpleParams)
+			? Hit.GetActor()
+			: nullptr;
+	}
+
+	// 3) Fallback: the interactable closest to the aim within reach, as long as nothing solid is in between.
+	// Catches small items on shelves where the shelf soaks up the traces above.
+	if (Target == nullptr || !Target->Implements<UBodycamInteractable>())
+	{
+		Target = nullptr;
+		float BestDot = FMath::Cos(FMath::DegreesToRadians(InteractAngle));
+		for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+		{
+			AActor* Candidate = *It;
+			if (!Candidate->Implements<UBodycamInteractable>())
+			{
+				continue;
+			}
+
+			FVector Center, Extent;
+			Candidate->GetActorBounds(true, Center, Extent);
+			const FVector ToCandidate = Center - Start;
+			const float Distance = ToCandidate.Size();
+			if (Distance > InteractDistance + Extent.Size() || Distance < KINDA_SMALL_NUMBER)
+			{
+				continue;
+			}
+
+			const float Dot = FVector::DotProduct(Direction, ToCandidate / Distance);
+			if (Dot <= BestDot)
+			{
+				continue;
+			}
+
+			// Visible unless something blocks the way well before the candidate itself.
+			// An open door's center often sits inside the frame or wall it swung against; that still counts as visible.
+			FCollisionQueryParams SightParams(SCENE_QUERY_STAT(BodycamInteract), false, this);
+			SightParams.AddIgnoredActor(Candidate);
+			FHitResult Blocker;
+			const bool bBlocked = GetWorld()->LineTraceSingleByChannel(Blocker, Start, Center, ECC_Visibility, SightParams)
+				&& Blocker.Distance < Distance - Extent.Size();
+			if (!bBlocked)
+			{
+				BestDot = Dot;
+				Target = Candidate;
+			}
+		}
+	}
+
 	if (Target && Target->Implements<UBodycamInteractable>())
 	{
 		IBodycamInteractable::Execute_Interact(Target, this);

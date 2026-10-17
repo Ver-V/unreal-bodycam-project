@@ -3,6 +3,7 @@
 #include "BodycamRigComponent.h"
 #include "Camera/CameraComponent.h"
 #include "GameFramework/Character.h"
+#include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/SpringArmComponent.h"
 
@@ -43,6 +44,18 @@ void UBodycamRigComponent::AddKick(const FRotator& Kick)
 void UBodycamRigComponent::AddPositionKick(const FVector& Kick)
 {
 	KickOffsetVelocity += Kick * FMath::Sqrt(KickStiffness);
+}
+
+void UBodycamRigComponent::StartDeathFall()
+{
+	if (bFalling)
+	{
+		return;
+	}
+	bFalling = true;
+	bFallLanded = false;
+	FallTime = 0.f;
+	FallSide = FMath::RandBool() ? 1.f : -1.f;
 }
 
 void UBodycamRigComponent::StepSpring(FVector& Value, FVector& Velocity, const FVector& Target, float Stiffness, float DampingRatio, float DeltaTime)
@@ -158,12 +171,35 @@ void UBodycamRigComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 	HeightSmoothingOffset = FMath::FInterpTo(HeightSmoothingOffset, 0.f, DeltaTime, HeightSmoothingSpeed);
 	const FVector HeightSmoothing(0.f, 0.f, HeightSmoothingOffset);
 
+	// --- Death fall: knees give, then the body drops faster and faster (ease-in, like gravity) and tips over ---
+	FVector FallOffset = FVector::ZeroVector;
+	FVector FallAngles = FVector::ZeroVector;
+	if (bFalling)
+	{
+		FallTime += DeltaTime;
+		const float T = FMath::Clamp(FallTime / DeathFallDuration, 0.f, 1.f);
+		const float Drop = MountOffset.Z + OwnerCharacter->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() - DeathFloorClearance;
+
+		// Height falls like gravity; the tilt leads a little so the view is already rolling as it goes down
+		FallOffset.Z = -Drop * T * T;
+		const float Tip = FMath::SmoothStep(0.f, 1.f, FMath::Min(T * 1.2f, 1.f));
+		FallAngles = FVector(DeathPitch * Tip, 0.f, DeathRoll * FallSide * Tip);
+
+		if (T >= 1.f && !bFallLanded)
+		{
+			// Thud on the floor
+			bFallLanded = true;
+			AddKick(FRotator(-4.f, 0.f, 6.f * FallSide));
+			AddPositionKick(FVector(0.f, 0.f, -4.f));
+		}
+	}
+
 	// --- Compose ---
-	const FVector Angles = FollowAngles + BobAngles * (BobAlpha * BobScale) + IdleAngles * SwayScale + KickAngles + FVector(0.f, 0.f, SmoothedTurnRoll);
+	const FVector Angles = FollowAngles + BobAngles * (BobAlpha * BobScale) + IdleAngles * SwayScale + KickAngles + FallAngles + FVector(0.f, 0.f, SmoothedTurnRoll);
 	const FRotator ViewRotation(Angles.X, Angles.Y, Angles.Z);
 	const FRotator ChestYaw(0.f, FollowAngles.Y, 0.f);
 
-	const FVector ViewLocation = OwnerCharacter->GetActorLocation() + HeightSmoothing
+	const FVector ViewLocation = OwnerCharacter->GetActorLocation() + HeightSmoothing + FallOffset
 		+ ChestYaw.RotateVector(MountOffset)
 		+ ViewRotation.RotateVector(BobOffset * (BobAlpha * BobScale) + KickOffset);
 
@@ -175,7 +211,8 @@ void UBodycamRigComponent::TickComponent(float DeltaTime, ELevelTick TickType, F
 		const FRotator TrueAim(FRotator::NormalizeAxis(Aim.Pitch), Aim.Yaw, 0.f);
 		const FQuat ArmRotation = FQuat::Slerp(ViewRotation.Quaternion(), TrueAim.Quaternion(), ArmAimFollow);
 
-		const FVector ArmLocation = OwnerCharacter->GetActorLocation() + HeightSmoothing
+		// The arms (and the gun-mounted flashlight) go down with the body too
+		const FVector ArmLocation = OwnerCharacter->GetActorLocation() + HeightSmoothing + FallOffset
 			+ ChestYaw.RotateVector(ArmPivotOffset)
 			+ ViewRotation.RotateVector(BobOffset * (BobAlpha * BobScale) + KickOffset);
 

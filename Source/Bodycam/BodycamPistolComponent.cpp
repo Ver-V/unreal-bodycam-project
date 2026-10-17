@@ -3,6 +3,7 @@
 #include "BodycamPistolComponent.h"
 #include "BodycamCharacter.h"
 #include "BodycamRigComponent.h"
+#include "BodycamZombie.h"
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -18,6 +19,7 @@
 #include "GameFramework/SpringArmComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundAttenuation.h"
+#include "GameFramework/DamageType.h"
 
 UBodycamPistolComponent::UBodycamPistolComponent()
 {
@@ -84,7 +86,7 @@ void UBodycamPistolComponent::Equip()
 	}
 
 	// From now on the flashlight is mounted on the gun instead of the chest
-	Character->MountFlashlightOnGun();
+	Character->OnPistolEquipped();
 
 	const bool bPlayed = PlayBusyMontage(DrawMontage);
 	UE_LOG(LogTemp, Log, TEXT("[Pistol] Equip: Mesh=%s AnimInstance=%s DrawMontage=%s Played=%d MeshLoc=%s"),
@@ -163,6 +165,7 @@ void UBodycamPistolComponent::Fire()
 	}
 
 	FireHitscan();
+	ABodycamZombie::AlertGunshot(this, Character->GetActorLocation());
 	PlayFireSound();
 	PlayMuzzleFlash();
 	ApplyRecoil();
@@ -181,7 +184,8 @@ void UBodycamPistolComponent::Fire()
 
 void UBodycamPistolComponent::Reload()
 {
-	if (Character == nullptr || !bEquipped || bBusy || AmmoInMagazine >= MagazineSize)
+	// Nothing to reload with, or nothing to top up
+	if (Character == nullptr || !bEquipped || bBusy || AmmoInMagazine >= MagazineSize || ReserveAmmo <= 0)
 	{
 		return;
 	}
@@ -198,9 +202,17 @@ void UBodycamPistolComponent::Reload()
 
 void UBodycamPistolComponent::FinishReload()
 {
+	// Top the magazine up from the spare rounds; the last reload may only partly fill it
+	const int32 Taken = FMath::Min(MagazineSize - AmmoInMagazine, ReserveAmmo);
+	ReserveAmmo -= Taken;
+	AmmoInMagazine += Taken;
+
 	// From empty the slide strips the first round off the new magazine into the chamber
-	AmmoInMagazine = bReloadFromEmpty ? MagazineSize - 1 : MagazineSize;
-	bRoundChambered = true;
+	if (bReloadFromEmpty && AmmoInMagazine > 0)
+	{
+		--AmmoInMagazine;
+		bRoundChambered = true;
+	}
 }
 
 bool UBodycamPistolComponent::PlayMontage(UAnimMontage* Montage)
@@ -267,6 +279,10 @@ void UBodycamPistolComponent::FireHitscan()
 		{
 			HitComponent->AddImpulseAtLocation(Direction * ImpactImpulse, Hit.ImpactPoint);
 		}
+
+		// Point damage carries the hit bone and shot direction (headshots, ragdoll push)
+		UGameplayStatics::ApplyPointDamage(Hit.GetActor(), Damage, Direction, Hit,
+			Character->GetController(), Character, UDamageType::StaticClass());
 
 		SpawnImpactEffects(Hit);
 	}

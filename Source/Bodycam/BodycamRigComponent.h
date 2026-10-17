@@ -37,6 +37,10 @@ public:
 	 */
 	void AbsorbHeightChange(float DeltaZ) { HeightSmoothingOffset -= DeltaZ; }
 
+	/** Player died: the camera (and the arms/flashlight) sink to the floor and tip onto their side */
+	UFUNCTION(BlueprintCallable, Category="Bodycam")
+	void StartDeathFall();
+
 	/** 0 = hip, 1 = fully aiming down sights. Blends the camera toward the Aim settings below. */
 	UFUNCTION(BlueprintCallable, Category="Bodycam")
 	void SetAimAlpha(float Alpha) { AimAlpha = FMath::Clamp(Alpha, 0.f, 1.f); }
@@ -98,11 +102,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bodycam|Bob")
 	float BobVertical = 1.6f;
 
+	/** Side-to-side shift per step (cm). Keep it small: a chest rig mostly bounces, a big sway reads as waddling. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bodycam|Bob")
-	float BobLateral = 1.2f;
+	float BobLateral = 0.4f;
 
+	/** Left/right tilt per step (degrees). Same as above: too much looks like a duck walk. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bodycam|Bob")
-	float BobRoll = 1.2f;
+	float BobRoll = 0.4f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bodycam|Bob")
 	float BobPitch = 0.6f;
@@ -148,6 +154,23 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bodycam|Kick", meta=(ClampMin="0.1", ClampMax="2"))
 	float KickDampingRatio = 0.5f;
 
+	// --- Death fall ---
+
+	/** Seconds from the killing blow until the camera hits the floor */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bodycam|Death")
+	float DeathFallDuration = 1.4f;
+
+	/** Camera height above the floor once down (cm) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bodycam|Death")
+	float DeathFloorClearance = 12.f;
+
+	/** Final tilt once lying on the floor (degrees). Roll side is picked at random. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bodycam|Death")
+	float DeathRoll = 80.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Bodycam|Death")
+	float DeathPitch = -12.f;
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
@@ -189,4 +212,10 @@ private:
 	/** World Z offset that hides capsule resizes; decays to zero */
 	float HeightSmoothingOffset = 0.f;
 	bool bInitialized = false;
+
+	bool bFalling = false;
+	bool bFallLanded = false;
+	float FallTime = 0.f;
+	/** +1 or -1: which shoulder the body falls onto */
+	float FallSide = 1.f;
 };

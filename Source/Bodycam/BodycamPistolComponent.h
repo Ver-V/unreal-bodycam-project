@@ -98,6 +98,10 @@ public:
 	UPROPERTY(EditAnywhere, Category="Pistol|Shooting")
 	float Range = 10000.f;
 
+	/** Damage per shot. Zombies have 100 health: 3 body shots, 1 headshot (x3). */
+	UPROPERTY(EditAnywhere, Category="Pistol|Shooting")
+	float Damage = 34.f;
+
 	/** Push applied to physics objects that get hit */
 	UPROPERTY(EditAnywhere, Category="Pistol|Shooting")
 	float ImpactImpulse = 30000.f;
@@ -166,6 +170,17 @@ public:
 
 	UPROPERTY(EditAnywhere, Category="Pistol|Ammo", meta=(ClampMin="1"))
 	int32 MagazineSize = 17;
+
+	/** Spare rounds carried besides the loaded magazine (34 = two spare magazines). Reloads draw from here; at 0 you can't reload. */
+	UPROPERTY(EditAnywhere, Category="Pistol|Ammo", meta=(ClampMin="0"))
+	int32 ReserveAmmo = 34;
+
+	UFUNCTION(BlueprintPure, Category="Pistol")
+	int32 GetReserveAmmo() const { return ReserveAmmo; }
+
+	/** Ammo pickups */
+	UFUNCTION(BlueprintCallable, Category="Pistol")
+	void AddReserveAmmo(int32 Rounds) { ReserveAmmo += FMath::Max(Rounds, 0); }
 
 	// --- Animation ---
 
